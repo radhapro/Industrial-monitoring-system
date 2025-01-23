@@ -1,0 +1,454 @@
+ #define BLYNK_TEMPLATE_ID "TMPL3H2Mf0Shc"
+#define BLYNK_TEMPLATE_NAME "Quickstart Template"
+#define BLYNK_PRINT Serial
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+
+// Blynk authentication token
+char auth[] = "Xny9L2cF9P0ZcKqfpvnRxQLfMba2DKjz";
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <RTClib.h>  // RTC library
+
+#include <PZEM004Tv30.h>
+#include <Wire.h>
+HardwareSerial mySerial(1);           // Using Serial1 for ESP32
+PZEM004Tv30 pzem(mySerial, 16, 17);
+
+const char* ssid = "ABCD";       // Replace with your network SSID
+const char* password = "123456789"; // Replace with your network password
+
+// ThingSpeak API details
+const char* server = "http://api.thingspeak.com/update";
+const String apiKey = "SNXCLERUEZ66N1BS";
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Initialize RTC
+RTC_DS3231 rtc;
+#include <SD.h>
+#include <SPI.h>
+
+const int CS_PIN = 5;
+const int LOG_INTERVAL = 2000;   // Logging interval in milliseconds
+
+// DHT11 sensor setup
+#define DHTPIN 4        // GPIO connected to the DHT11 data pin
+#define DHTTYPE DHT11   // DHT 11
+DHT dht(DHTPIN, DHTTYPE);
+
+// Relay and buzzer pins
+#define RELAY_PIN 2     // GPIO connected to relay
+#define BUZZER_PIN 18
+#define RELAY_PIN_15 15           // Relay connected to D15
+#define THRESHOLD_CURRENT 0.50 // Threshold current (0.50A)
+
+// Dust sensor pins
+#define ledPower 27        // LED control pin for dust sensor
+#define measurePin 34
+int samplingTime = 280;
+int deltaTime = 40;
+int sleepTime = 9680;
+
+float voMeasured = 0;
+float calcVoltage = 0;
+float dustDensity = 0;
+// Temperature threshold for relay activation
+const float TEMP_THRESHOLD = 30.0; // Set temperature threshold in °C
+
+// Relay control variables
+bool relayOn = false;
+unsigned long relayOnTime = 0;  // To store the time when relay was turned on
+
+void setup()
+{
+  Serial.begin(115200);
+  mySerial.begin(9600, SERIAL_8N1, 17, 16);  // Initialize serial with baud rate, RX=17, TX=16
+
+  Wire.begin(21, 22);
+  lcd.init();
+  lcd.backlight();
+
+  // Initialize DHT11 sensor
+  dht.begin();
+
+  // Set relay, buzzer, and LED pin as output
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(ledPower, OUTPUT);
+  pinMode(RELAY_PIN_15, OUTPUT);
+  digitalWrite(RELAY_PIN_15, 0); // Initially relay ON (HIGH)
+  // Start by turning relay and buzzer off
+  digitalWrite(RELAY_PIN, 0); // Relay off (assuming LOW is ON)
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Initial message on LCD
+  lcd.setCursor(0, 0);
+  lcd.print("Temp & Humidity:");
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    lcd.setCursor(0, 1);
+    lcd.print("Connecting...");
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print("Connected!");
+  delay(2000);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("PZEM Test");
+  lcd.setCursor(0, 1);
+  lcd.print("Monitoring...");
+  delay(2000);  // Show for 2 seconds
+  lcd.clear();
+  // Initialize RTC and check if it's running
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    while (1);
+  }
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set to compile time
+  }
+
+  // Blynk aur DHT sensor initialize karna
+  Blynk.begin(auth, ssid, password);
+
+  // Blynk connection check karna
+  if (Blynk.connected())
+  {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Blynk Application ");
+    lcd.setCursor(0, 1);
+    lcd.print("is Online......");
+    delay(1000);
+  }
+  else
+  {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Blynk Not Connected");
+  }
+  // Initialize the SD card
+  if (!SD.begin(CS_PIN))
+  {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("SD Card Failed");
+    Serial.println("SD Card Mount Failed");
+    return;
+  }
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("     SD Card    ");
+  lcd.setCursor(0, 0);
+  lcd.print("   initialized..    ");
+  Serial.println("SD Card initialized successfully");
+  delay(1000);
+}
+float temperature; float pf;
+void loop()
+{
+  Blynk.run();
+  // Read temperature and humidity
+  temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  //  Blynk.virtualWrite(V1, temperature); // Temperature ko Blynk par V1 pin mein dikhaye
+
+  // Check if any reads failed
+  if (isnan(temperature) || isnan(humidity))
+  {
+    lcd.setCursor(0, 1);
+    lcd.print("Sensor Error!");
+    delay(2000);
+    return;
+  }
+
+  if (temperature > TEMP_THRESHOLD)
+  {
+    digitalWrite(RELAY_PIN, 1); // Relay ON
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("temp increase");
+  } else {
+    digitalWrite(RELAY_PIN, 0); // Relay OFF
+  }
+  // Read time from RTC
+  DateTime now = rtc.now();
+
+  // Dust sensor reading
+  digitalWrite(ledPower, LOW); // power on the LED
+  delayMicroseconds(samplingTime);
+
+  voMeasured = analogRead(measurePin); // read the dust value
+
+  delayMicroseconds(deltaTime);
+  digitalWrite(ledPower, HIGH); // turn the LED off
+  delayMicroseconds(sleepTime);
+
+  // 0 - 5V mapped to 0 - 1023 integer values
+  // recover voltage
+
+
+  float calcVoltage = voMeasured * (5.0 / 4095.0);
+  float dustDensity = (calcVoltage - 0.6) * 1000.0 / 5.0;
+  Serial.println(dustDensity); // unit: ug/m3
+
+  delay(100);
+
+  // Alternate display between time/temp/humidity and dust density every 2 seconds
+  static unsigned long lastSwitchTime = 0;
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastSwitchTime >= 2000) {
+    lastSwitchTime = currentMillis;
+
+    // First Screen: Time, Temperature, and Humidity
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Time: ");
+    lcd.print(now.hour());
+    lcd.print(":");
+    lcd.print(now.minute());
+
+    lcd.setCursor(0, 1);
+    lcd.print("T:");
+    lcd.print(temperature); Blynk.virtualWrite(V2, temperature);
+    lcd.print("C H:");
+    lcd.print(humidity);
+    lcd.print("%");
+
+    delay(1500);  // Show this screen for 2 seconds
+
+    // Second Screen: Dust Density
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Dust Density:");
+    Serial.print("Dust Density:");
+    lcd.setCursor(0, 1);
+    lcd.print(dustDensity);
+    Serial.print(dustDensity);
+    Serial.println(" ug/m3");
+    lcd.print(" ug/m3");
+    delay(1500); // Show this screen for 2 seconds
+
+    lcd.clear();
+    float voltage = pzem.voltage();
+    if (!isnan(voltage))
+    {
+      int voltageInt = (int)(voltage + 0.5);
+      Serial.print("Voltage: ");
+      Serial.print(voltageInt);
+      Serial.println("V");
+
+      lcd.setCursor(0, 0);
+      lcd.print("Volt: ");
+      lcd.print(voltageInt);
+      lcd.print("V");
+    } else {
+      Serial.println("Error reading voltage");
+      lcd.setCursor(0, 0);
+      lcd.print("Volt: Error");
+    }
+
+    delay(1500);
+    lcd.clear();
+
+    // Reading Current
+    float curren = pzem.current();
+    if (!isnan(curren))
+    {
+      Serial.print("Current: ");
+      Serial.print(curren, 2);  // 1 decimal point
+      Serial.println("A");
+
+      lcd.setCursor(0, 0);
+      lcd.print("Cur: ");
+      lcd.print(curren, 2);
+      lcd.print("A");
+    } else {
+      Serial.println("Error reading current");
+      lcd.setCursor(0, 1);
+      lcd.print("Cur: Error");
+    }
+
+    if (curren > THRESHOLD_CURRENT)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Over load...");
+      lcd.setCursor(0, 1);
+      lcd.print("bulb off....");
+      // If current > 0.50A, turn off the relay
+      digitalWrite(RELAY_PIN_15, 0);  // LOW turns off the relay
+
+    } else {
+      // If current <= 0.50A, turn on the relay
+      digitalWrite(RELAY_PIN_15, 1); // HIGH turns on the relay
+    }
+    delay(1500);
+    lcd.clear();
+    // Reading Power
+    float power = pzem.power();
+    if (!isnan(power)) {
+      Serial.print("Power: ");
+      Serial.print(power, 1);  // 1 decimal point
+      Serial.println("W");
+
+      lcd.setCursor(0, 0);
+      lcd.print("Power: ");
+      lcd.print(power, 1);
+      lcd.print("W");
+      Blynk.virtualWrite(V3, power);
+    } else {
+      Serial.println("Error reading power");
+      lcd.setCursor(0, 0);
+      lcd.print("Power: Error");
+    }
+    delay(1500);
+    lcd.clear();
+
+    // Reading Power Factor (PF)
+    pf = pzem.pf();
+    if (!isnan(pf))
+    {
+      Serial.print("PF: ");
+      Serial.println(pf, 2);  // Print with 2 decimal points
+
+      lcd.setCursor(0, 0);
+      lcd.print("PF: ");
+      lcd.print(pf, 2);
+      Blynk.virtualWrite(V4, pf);
+    }
+    else
+    {
+      Serial.println("Error reading power factor");
+      lcd.setCursor(0, 0);
+      lcd.print("PF: Error");
+    }
+    delay(1500);
+  }
+
+  // Relay control logic
+  int currentHour = now.hour();
+  int currentMinute = now.minute();
+
+  float volt  = pzem.voltage();
+  Serial.print ("volt:");
+  Serial.print (volt);
+  float curren   = pzem.current();
+  Serial.print ("current:");
+  Serial.print (curren);
+  float powe  = pzem.power();
+  Serial.print ("power:");
+  Serial.print (powe);
+  float frequency = pzem.frequency();
+  Serial.print ("frequency:");
+  Serial.print (frequency);
+  pf = pzem.pf();
+  Serial.print ("pf:");
+  Serial.println(pf);
+  Blynk.virtualWrite(V4, pf);
+
+
+  //thinkspeak
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = String(server) + "?api_key=" + apiKey +
+                 "&field1=" + String(temperature) +
+                 "&field2=" + String(humidity) +
+                 "&field3=" + String(dustDensity) +
+                 "&field4=" + String(pf ) +
+                 "&field5=" + String(volt ) +
+                 "&field6=" + String(powe ) +
+                 "&field7=" + String(curren) +
+                 "&field8=" + String(frequency);
+
+    http.begin(url);
+    int httpResponseCode = http.GET();
+    if (httpResponseCode > 0) {
+      Serial.println("Data sent successfully!");
+    } else {
+      Serial.println("Error sending data!");
+    }
+    http.end();
+  } else {
+    lcd.setCursor(0, 1);
+    lcd.print("WiFi Error!");
+  }
+  delay(500);
+  logSensorData();
+  delay(LOG_INTERVAL);  // Wait for the next logging interval
+  delay(2000);  // Update loop delay
+}
+
+BLYNK_WRITE(V1) // Replace V1 with the virtual pin you want to use for motor control
+{
+  int relay = param.asInt();
+  Serial.println(relay);
+  if (relay == 1)
+  {
+
+    digitalWrite(RELAY_PIN, 1);
+    Serial.println("MOTOR ON (by Blynk)");
+    lcd.clear();
+    lcd.print("relay on");
+    delay(2000);
+  }
+  else
+  {
+    digitalWrite(RELAY_PIN, 0);
+  }
+}
+
+void logSensorData() {
+
+  Serial.print("temperature Sensor Value: ");
+  Serial.print(temperature);
+  Serial.print(" | pf: ");
+  Serial.print(pf, 2);
+
+  File dataFile = SD.open("/sensor_data.txt", FILE_APPEND);
+  if (dataFile) {
+    dataFile.print("Time: ");
+    dataFile.print(millis() / 1000); // Log time in seconds since start
+    dataFile.print("s | temperature Sensor Value: ");
+    dataFile.print(temperature);
+    dataFile.print(" | pf: ");
+    dataFile.print(pf, 2);
+
+    dataFile.close(); // Close the file
+    Serial.println("Data successfully logged to SD card.");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Data logged into ");
+    lcd.setCursor(0, 1);
+    lcd.print("SD card..... ");
+    delay(2000);
+  } else {
+    Serial.println("Failed to open file for writing");
+  }
+}
+
+void readLoggedData()
+{
+  File dataFile = SD.open("/sensor_data.txt");
+  if (dataFile) {
+    Serial.println("Reading data from SD card:");
+    while (dataFile.available()) {
+      Serial.write(dataFile.read()); // Print each character from the file
+
+    }
+    dataFile.close();
+    Serial.println("\nEnd of file.");
+  } else {
+    Serial.println("Failed to open file for reading");
+  }
+}
